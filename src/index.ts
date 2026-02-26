@@ -1,14 +1,8 @@
 import 'dotenv/config'
 import express from 'express'
 import cors from 'cors'
-import { config } from './config/index.js'
 import { attestationsRouter } from './routes/attestations.js'
-import { healthRouter } from './routes/health.js'
-import { integrationsShopifyRouter } from './routes/integrations-shopify.js'
-import express from "express";
-import cors from "cors";
-import { attestationsRouter } from "./routes/attestations.js";
-import { errorHandler } from "./middleware/errorHandler.js";
+import { errorHandler } from './middleware/errorHandler.js'
 import { analyticsRouter } from './routes/analytics.js'
 import { healthRouter } from './routes/health.js'
 import { authRouter } from './routes/auth.js'
@@ -19,6 +13,8 @@ import {
 import businessRoutes from './routes/businesses.js'
 import integrationsRazorpayRouter from './routes/integrations-razorpay.js'
 import integrationsRouter from './routes/integrations.js'
+import { integrationsStripeRouter } from './routes/integrations-stripe.js'
+import { requestLogger } from './middleware/requestLogger.js'
 
 export const app = express();
 const PORT = process.env.PORT ?? 3000;
@@ -35,6 +31,7 @@ app.use('/api/health', healthRouter)
 app.use('/api/attestations', attestationsRouter)
 app.use('/api/businesses', businessRoutes)
 app.use('/api/analytics', analyticsRouter)
+app.use('/api/integrations/stripe', integrationsStripeRouter)
 app.use('/api/integrations/razorpay', integrationsRazorpayRouter)
 app.use('/api/integrations', integrationsRouter)
 
