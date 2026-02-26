@@ -1,8 +1,5 @@
 import crypto from 'crypto'
 
-/**
- * Integration record representing a connection to an external service provider
- */
 export interface Integration {
   id: string
   userId: string

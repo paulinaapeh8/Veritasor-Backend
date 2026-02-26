@@ -7,12 +7,13 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
-    "lint": "eslint src",
-    "test": "vitest run"
+    "lint": "eslint src"
   },
   "dependencies": {
+    "@stellar/stellar-sdk": "^14.5.0",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
+    "express": "^4.21.1"
     "express": "^4.21.1",
     "jsonwebtoken": "^9.0.2",
     "nodemailer": "^6.9.16",
@@ -30,9 +31,7 @@
     "@types/supertest": "^6.0.3",
     "@vitest/coverage-v8": "^4.0.18",
     "eslint": "^9.15.0",
-    "supertest": "^7.2.2",
     "tsx": "^4.19.2",
-    "typescript": "~5.6.2",
-    "vitest": "^4.0.18"
+    "typescript": "~5.6.2"
   }
 }
