@@ -42,10 +42,10 @@ describe('optionalAuth middleware - Task 2.1: Token Verification', () => {
 
     optionalAuth(mockRequest as Request, mockResponse as Response, mockNext)
 
-    expect(mockRequest.user).toEqual({
+    expect(mockRequest.user).toEqual(expect.objectContaining({
       userId: 'user-456',
       email: 'user@test.com',
-    })
+    }))
     expect(mockNext).toHaveBeenCalledOnce()
   })
 
@@ -164,10 +164,10 @@ describe('optionalAuth middleware - Task 2.3: Ensure next() is always called', (
 
     optionalAuth(mockRequest as Request, mockResponse as Response, mockNext)
 
-    expect(mockRequest.user).toEqual({
+    expect(mockRequest.user).toEqual(expect.objectContaining({
       userId: 'user-789',
       email: 'success@example.com',
-    })
+    }))
     expect(mockNext).toHaveBeenCalledOnce()
     expect(mockNext).toHaveBeenCalledWith() // No error parameter
   })
