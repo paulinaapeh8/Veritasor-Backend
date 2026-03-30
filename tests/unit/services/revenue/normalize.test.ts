@@ -1,22 +1,9 @@
 import { describe, it, expect } from "vitest";
 import {
   normalizeRevenueEntry,
-  type RawRevenueInput,
-  type NormalizedRevenue,
+  detectNormalizationDrift,
 } from "../../../../src/services/revenue/normalize.js";
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/** Build a minimal valid raw input, overriding only the specified fields. */
-function raw(overrides: Partial<RawRevenueInput> & { id: string; amount: number }): RawRevenueInput {
-  return { date: "2025-01-01", source: "test", ...overrides };
-}
-
-// ---------------------------------------------------------------------------
-// Core behaviour (canonical)
-// ---------------------------------------------------------------------------
+import type { NormalizedRevenue, NormalizationBaseline } from "../../../../src/services/revenue/normalize.js";
 
 describe("revenue normalizer", () => {
   it("should produce the canonical shape", () => {
@@ -422,5 +409,209 @@ describe("revenue normalizer", () => {
       expect(neg.type).toBe("refund");
       expect(zer.type).toBe("payment");
     });
+  });
+});
+
+describe("detectNormalizationDrift", () => {
+  const baseline: NormalizationBaseline = {
+    refundRate: 0.1,
+    unknownSourceRate: 0.05,
+    usdRate: 0.8,
+    meanAmount: 100,
+  };
+
+  function makeEntry(overrides: Partial<NormalizedRevenue> = {}): NormalizedRevenue {
+    return {
+      id: "txn_test",
+      amount: 100,
+      currency: "USD",
+      date: "2025-01-01T00:00:00.000Z",
+      type: "payment",
+      source: "stripe",
+      ...overrides,
+    };
+  }
+
+  it("should return insufficient_data when entry count is below minimum", () => {
+    const entries = [makeEntry(), makeEntry(), makeEntry()]; // 3 < default min 5
+    const result = detectNormalizationDrift(entries, baseline);
+
+    expect(result.hasDrift).toBe(false);
+    expect(result.overallScore).toBe(0);
+    expect(result.checks[0].flag).toBe("insufficient_data");
+    expect(result.summary).toContain("Insufficient data");
+  });
+
+  it("should return insufficient_data for an empty array", () => {
+    const result = detectNormalizationDrift([], baseline);
+
+    expect(result.hasDrift).toBe(false);
+    expect(result.checks[0].flag).toBe("insufficient_data");
+  });
+
+  it("should report no drift when entries exactly match the baseline", () => {
+    // 10 entries: 1 refund (10%), 1 unknown source (10%), 8 USD (80%), avg amount 100
+    const matchingBaseline: NormalizationBaseline = {
+      refundRate: 0.1,
+      unknownSourceRate: 0.1,
+      usdRate: 0.8,
+      meanAmount: 100,
+    };
+    const entries: NormalizedRevenue[] = [
+      makeEntry({ type: "refund", amount: -100 }),
+      makeEntry({ source: "unknown" }),
+      makeEntry({ currency: "EUR" }),
+      makeEntry({ currency: "EUR" }),
+      ...Array.from({ length: 6 }, () => makeEntry()),
+    ];
+
+    const result = detectNormalizationDrift(entries, matchingBaseline);
+
+    expect(result.hasDrift).toBe(false);
+    expect(result.summary).toBe("No normalization drift detected.");
+  });
+
+  it("should flag refund_rate_drift when refund fraction deviates significantly", () => {
+    // 3 refunds out of 5 = 60% vs baseline 10%
+    const entries: NormalizedRevenue[] = [
+      makeEntry({ type: "refund", amount: -100 }),
+      makeEntry({ type: "refund", amount: -100 }),
+      makeEntry({ type: "refund", amount: -100 }),
+      makeEntry(),
+      makeEntry(),
+    ];
+
+    const result = detectNormalizationDrift(entries, baseline);
+    const refundCheck = result.checks.find((c) => c.metric === "refund_rate");
+
+    expect(result.hasDrift).toBe(true);
+    expect(refundCheck?.flag).toBe("refund_rate_drift");
+  });
+
+  it("should flag unknown_source_drift when unknown source fraction deviates", () => {
+    // 4 unknown sources out of 5 = 80% vs baseline 5%
+    const entries: NormalizedRevenue[] = [
+      makeEntry({ source: "unknown" }),
+      makeEntry({ source: "unknown" }),
+      makeEntry({ source: "unknown" }),
+      makeEntry({ source: "unknown" }),
+      makeEntry(),
+    ];
+
+    const result = detectNormalizationDrift(entries, baseline);
+    const sourceCheck = result.checks.find((c) => c.metric === "unknown_source_rate");
+
+    expect(result.hasDrift).toBe(true);
+    expect(sourceCheck?.flag).toBe("unknown_source_drift");
+  });
+
+  it("should flag usd_rate_drift when USD currency fraction deviates", () => {
+    // 0 USD entries out of 5 = 0% vs baseline 80%
+    const entries: NormalizedRevenue[] = Array.from({ length: 5 }, () =>
+      makeEntry({ currency: "EUR" })
+    );
+
+    const result = detectNormalizationDrift(entries, baseline);
+    const usdCheck = result.checks.find((c) => c.metric === "usd_rate");
+
+    expect(result.hasDrift).toBe(true);
+    expect(usdCheck?.flag).toBe("usd_rate_drift");
+  });
+
+  it("should flag amount_drift when mean amount deviates significantly", () => {
+    // avg amount 10000 vs baseline 100 → 9900% relative deviation
+    const entries: NormalizedRevenue[] = Array.from({ length: 5 }, () =>
+      makeEntry({ amount: 10000 })
+    );
+
+    const result = detectNormalizationDrift(entries, baseline);
+    const amountCheck = result.checks.find((c) => c.metric === "mean_amount");
+
+    expect(result.hasDrift).toBe(true);
+    expect(amountCheck?.flag).toBe("amount_drift");
+  });
+
+  it("should detect multiple drifting metrics simultaneously", () => {
+    // High refund rate AND high unknown source rate; amounts kept at 100
+    const entries: NormalizedRevenue[] = [
+      makeEntry({ type: "refund", amount: -100, source: "unknown" }),
+      makeEntry({ type: "refund", amount: -100, source: "unknown" }),
+      makeEntry({ type: "refund", amount: -100, source: "unknown" }),
+      makeEntry({ source: "unknown" }),
+      makeEntry(),
+    ];
+
+    const result = detectNormalizationDrift(entries, baseline);
+    const driftedFlags = result.checks
+      .filter((c) => c.flag !== "ok")
+      .map((c) => c.flag);
+
+    expect(result.hasDrift).toBe(true);
+    expect(driftedFlags).toContain("refund_rate_drift");
+    expect(driftedFlags).toContain("unknown_source_drift");
+  });
+
+  it("should respect custom threshold and suppress drift below it", () => {
+    // Refund rate: 2/10 = 20% vs baseline 10% → 100% relative deviation
+    // With a 200% threshold no drift should be flagged
+    const entries: NormalizedRevenue[] = [
+      makeEntry({ type: "refund", amount: -100 }),
+      makeEntry({ type: "refund", amount: -100 }),
+      ...Array.from({ length: 8 }, () => makeEntry()),
+    ];
+
+    const result = detectNormalizationDrift(entries, baseline, { threshold: 2.0 });
+    const refundCheck = result.checks.find((c) => c.metric === "refund_rate");
+
+    expect(refundCheck?.flag).toBe("ok");
+  });
+
+  it("should respect custom minEntries option", () => {
+    // 3 entries is below the default minimum of 5, but above minEntries: 2
+    const entries: NormalizedRevenue[] = [makeEntry(), makeEntry(), makeEntry()];
+    const result = detectNormalizationDrift(entries, baseline, { minEntries: 2 });
+
+    expect(result.checks[0].flag).not.toBe("insufficient_data");
+  });
+
+  it("should set overallScore to the maximum score across all checks", () => {
+    // Severe amount drift → score clamped to 1.0
+    const entries: NormalizedRevenue[] = Array.from({ length: 5 }, () =>
+      makeEntry({ amount: 10000 })
+    );
+
+    const result = detectNormalizationDrift(entries, baseline);
+    const maxScore = Math.max(...result.checks.map((c) => c.score));
+
+    expect(result.overallScore).toBe(maxScore);
+    expect(result.overallScore).toBeGreaterThan(0);
+  });
+
+  it("should handle zero baseline rate with zero observed — no drift", () => {
+    const zeroBaseline = { ...baseline, unknownSourceRate: 0 };
+    const entries: NormalizedRevenue[] = Array.from({ length: 5 }, () => makeEntry());
+
+    const result = detectNormalizationDrift(entries, zeroBaseline);
+    const sourceCheck = result.checks.find((c) => c.metric === "unknown_source_rate");
+
+    expect(sourceCheck?.flag).toBe("ok");
+    expect(sourceCheck?.score).toBe(0);
+  });
+
+  it("should flag drift when baseline rate is zero but observed is non-zero", () => {
+    const zeroBaseline = { ...baseline, unknownSourceRate: 0 };
+    const entries: NormalizedRevenue[] = [
+      makeEntry({ source: "unknown" }),
+      makeEntry({ source: "unknown" }),
+      makeEntry(),
+      makeEntry(),
+      makeEntry(),
+    ];
+
+    const result = detectNormalizationDrift(entries, zeroBaseline);
+    const sourceCheck = result.checks.find((c) => c.metric === "unknown_source_rate");
+
+    expect(sourceCheck?.flag).toBe("unknown_source_drift");
+    expect(sourceCheck?.score).toBe(1); // clamped to maximum
   });
 });
