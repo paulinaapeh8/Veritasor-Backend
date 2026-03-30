@@ -413,3 +413,4 @@ test('SorobanSubmissionError preserves cause', () => {
   const err = new SorobanSubmissionError('wrapped', 'WRAP', cause)
   assert.strictEqual(err.cause, cause)
 })
+
