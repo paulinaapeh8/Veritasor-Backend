@@ -1,14 +1,11 @@
 /**
- * Shopify OAuth callback: validate state, exchange code for access token, store token.
- * Access tokens are never logged.
+ * Shopify OAuth callback: validate state, exchange code for an access token,
+ * and persist the connected installation.
+ * Access tokens are never logged or returned.
  */
 
+import * as integrationRepository from '../../../repositories/integration.js'
 import * as store from './store.js'
-
-const clientId = process.env.SHOPIFY_CLIENT_ID ?? ''
-const clientSecret = process.env.SHOPIFY_CLIENT_SECRET ?? ''
-
-const SHOP_HOST_REGEX = /^[a-zA-Z0-9][a-zA-Z0-9.-]*\.myshopify\.com$/
 
 export interface CallbackParams {
   code: string
@@ -27,21 +24,20 @@ export interface CallbackResult {
  */
 export async function handleCallback(params: CallbackParams): Promise<CallbackResult> {
   const { code, shop, state } = params
+  const clientId = process.env.SHOPIFY_CLIENT_ID ?? ''
+  const clientSecret = process.env.SHOPIFY_CLIENT_SECRET ?? ''
 
   if (!code || !shop || !state) {
     return { success: false, error: 'Missing code, shop, or state' }
   }
 
-  const normalizedShop = shop.trim().toLowerCase()
-  const shopHost = normalizedShop.endsWith('.myshopify.com')
-    ? normalizedShop
-    : `${normalizedShop.replace(/\.myshopify\.com$/i, '')}.myshopify.com`
-  if (!SHOP_HOST_REGEX.test(shopHost)) {
+  const shopHost = store.normalizeShop(shop)
+  if (!store.isValidShopHost(shopHost)) {
     return { success: false, error: 'Invalid shop hostname' }
   }
 
-  const storedShop = store.consumeOAuthState(state)
-  if (!storedShop || storedShop !== shopHost) {
+  const stateRecord = store.consumeOAuthState(state)
+  if (!stateRecord || stateRecord.shop !== shopHost) {
     return { success: false, error: 'Invalid or expired state' }
   }
 
@@ -78,5 +74,39 @@ export async function handleCallback(params: CallbackParams): Promise<CallbackRe
   }
 
   store.saveToken(shopHost, accessToken)
+
+  const existingShopifyIntegration = (await integrationRepository.listByUserId(stateRecord.userId)).find(
+    (integration) => integration.provider === 'shopify',
+  )
+
+  if (existingShopifyIntegration && existingShopifyIntegration.externalId !== shopHost) {
+    await integrationRepository.deleteById(existingShopifyIntegration.id)
+    store.deleteToken(existingShopifyIntegration.externalId)
+  }
+
+  const reusableIntegration =
+    existingShopifyIntegration && existingShopifyIntegration.externalId === shopHost
+      ? existingShopifyIntegration
+      : null
+
+  if (reusableIntegration) {
+    const updated = await integrationRepository.update(reusableIntegration.id, {
+      token: { accessToken },
+      metadata: { shop: shopHost },
+    })
+
+    if (!updated) {
+      return { success: false, error: 'Failed to persist Shopify integration' }
+    }
+  } else {
+    await integrationRepository.create({
+      userId: stateRecord.userId,
+      provider: 'shopify',
+      externalId: shopHost,
+      token: { accessToken },
+      metadata: { shop: shopHost },
+    })
+  }
+
   return { success: true, shop: shopHost }
 }
