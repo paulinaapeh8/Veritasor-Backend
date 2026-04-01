@@ -2,8 +2,10 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vites
 import request from "supertest";
 import express, { Express } from "express";
 import integrationsRouter from "../../src/routes/integrations.js";
+import integrationsRazorpayRouter from "../../src/routes/integrations-razorpay.js";
 import { IntegrationPermission, ROLE_PERMISSIONS } from "../../src/types/permissions.js";
 import { clearAll } from "../../src/repositories/integration.js";
+import { integrationRepository } from "../../src/repositories/integrations.js";
 
 // Mock the auth middleware to simulate different user roles
 vi.mock("../../src/middleware/auth.js", () => ({
@@ -49,6 +51,15 @@ const mockIntegrationData = {
 // Test app setup
 let app: Express;
 
+function razorpayApiResponse(status: number, body: unknown): Response {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    json: async () => body,
+    text: async () => JSON.stringify(body),
+  } as Response;
+}
+
 beforeAll(() => {
   app = express();
   app.use(express.json());
@@ -61,6 +72,140 @@ beforeEach(() => {
 
 afterAll(() => {
   vi.restoreAllMocks();
+});
+
+describe("Razorpay Connect Credential Integrity Checks", () => {
+  let razorpayApp: Express;
+  const originalFetch = global.fetch;
+
+  beforeEach(() => {
+    razorpayApp = express();
+    razorpayApp.use(express.json());
+    razorpayApp.use("/api/integrations/razorpay", integrationsRazorpayRouter);
+    global.fetch = vi.fn();
+  });
+
+  afterAll(() => {
+    global.fetch = originalFetch;
+  });
+
+  it("stores a verified Razorpay connection without exposing the secret", async () => {
+    const userId = `razorpay-user-${Date.now()}`;
+
+    vi.mocked(global.fetch).mockResolvedValueOnce(
+      razorpayApiResponse(200, { entity: "collection", items: [] }),
+    );
+
+    const response = await request(razorpayApp)
+      .post("/api/integrations/razorpay")
+      .set("x-user-id", userId)
+      .send({
+        apiKeyId: "rzp_test_123456789",
+        apiKeySecret: "secret_1234567890abcdef",
+      })
+      .expect(201);
+
+    expect(global.fetch).toHaveBeenCalledWith(
+      "https://api.razorpay.com/v1/payments?count=1",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Accept: "application/json",
+          Authorization: expect.stringMatching(/^Basic /),
+        }),
+        signal: expect.any(AbortSignal),
+      }),
+    );
+    expect(response.body.meta.apiKeyId).toBe("rzp_test_123456789");
+    expect(response.body.meta.apiKeySecret).toBe("*****");
+    expect(response.body.meta.credentialFingerprint).toMatch(/^[a-f0-9]{64}$/);
+    expect(response.body.meta.verifiedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+
+    const storedRecords = integrationRepository.listByUser(userId);
+    expect(storedRecords).toHaveLength(1);
+    expect(storedRecords[0]?.meta.apiKeySecret).toBe("secret_1234567890abcdef");
+  });
+
+  it("rejects padded credentials before calling Razorpay", async () => {
+    const response = await request(razorpayApp)
+      .post("/api/integrations/razorpay")
+      .set("x-user-id", `razorpay-user-${Date.now()}`)
+      .send({
+        apiKeyId: " rzp_test_padded ",
+        apiKeySecret: "secret_1234567890abcdef",
+      })
+      .expect(400);
+
+    expect(response.body.error).toMatch(/without surrounding whitespace/i);
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it("returns a conflict for duplicate Razorpay connections", async () => {
+    const userId = `razorpay-user-${Date.now()}`;
+
+    vi.mocked(global.fetch).mockResolvedValueOnce(
+      razorpayApiResponse(200, { entity: "collection", items: [] }),
+    );
+
+    await request(razorpayApp)
+      .post("/api/integrations/razorpay")
+      .set("x-user-id", userId)
+      .send({
+        apiKeyId: "rzp_test_duplicate",
+        apiKeySecret: "secret_duplicate_123456",
+      })
+      .expect(201);
+
+    const response = await request(razorpayApp)
+      .post("/api/integrations/razorpay")
+      .set("x-user-id", userId)
+      .send({
+        apiKeyId: "rzp_test_duplicate",
+        apiKeySecret: "secret_duplicate_123456",
+      })
+      .expect(409);
+
+    expect(response.body.error).toMatch(/already connected/i);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats Razorpay auth failures as invalid credentials without leaking upstream details", async () => {
+    vi.mocked(global.fetch).mockResolvedValueOnce(
+      razorpayApiResponse(401, {
+        error: {
+          description: "Invalid credentials submitted to Razorpay",
+        },
+      }),
+    );
+
+    const response = await request(razorpayApp)
+      .post("/api/integrations/razorpay")
+      .set("x-user-id", `razorpay-user-${Date.now()}`)
+      .send({
+        apiKeyId: "rzp_test_invalid",
+        apiKeySecret: "secret_invalid_123456",
+      })
+      .expect(400);
+
+    expect(response.body).toEqual({ error: "Invalid Razorpay credentials" });
+    expect(JSON.stringify(response.body)).not.toMatch(/submitted to razorpay/i);
+  });
+
+  it("rejects unexpected Razorpay verification payloads", async () => {
+    vi.mocked(global.fetch).mockResolvedValueOnce(
+      razorpayApiResponse(200, { ok: true }),
+    );
+
+    const response = await request(razorpayApp)
+      .post("/api/integrations/razorpay")
+      .set("x-user-id", `razorpay-user-${Date.now()}`)
+      .send({
+        apiKeyId: "rzp_test_unexpected",
+        apiKeySecret: "secret_unexpected_1234",
+      })
+      .expect(502);
+
+    expect(response.body).toEqual({ error: "Unexpected Razorpay verification response" });
+  });
 });
 
 describe("Integrations Granular Permission System", () => {
