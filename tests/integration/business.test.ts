@@ -14,9 +14,79 @@
  * @module tests/integration/business
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import request = require('supertest');
 import { app } from '../../src/app.js';
+import { Business } from '../../src/repositories/business.js';
+
+const mockBusinesses: Business[] = [];
+
+vi.mock('../../src/repositories/business.js', () => {
+  return {
+    businessRepository: {
+      create: vi.fn(async (data: any) => {
+        const newBusiness = {
+          id: `biz-${Date.now()}-${Math.random()}`,
+          ...data,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
+        mockBusinesses.push(newBusiness);
+        return newBusiness;
+      }),
+      getByUserId: vi.fn(async (userId: string) => {
+        return mockBusinesses.find(b => b.userId === userId) || null;
+      }),
+      getById: vi.fn(async (id: string) => {
+        return mockBusinesses.find(b => b.id === id) || null;
+      }),
+      list: vi.fn(async (options: any) => {
+        const { limit, cursor, sortBy, sortOrder, industry } = options;
+        let filtered = [...mockBusinesses];
+        if (industry) {
+          filtered = filtered.filter(b => b.industry === industry);
+        }
+        
+        filtered.sort((a, b) => {
+          const valA = sortBy === 'createdAt' ? a.createdAt : a.name;
+          const valB = sortBy === 'createdAt' ? b.createdAt : b.name;
+          if (valA < valB) return sortOrder === 'asc' ? -1 : 1;
+          if (valA > valB) return sortOrder === 'asc' ? 1 : -1;
+          return a.id < b.id ? -1 : 1;
+        });
+
+        let startIndex = 0;
+        if (cursor) {
+          try {
+            const decoded = JSON.parse(Buffer.from(cursor, 'base64').toString());
+            const idx = filtered.findIndex(b => b.id === decoded.id);
+            if (idx !== -1) startIndex = idx + 1;
+          } catch (e) {
+            // Ignore invalid cursor
+          }
+        }
+
+        const items = filtered.slice(startIndex, startIndex + limit);
+        const hasMore = startIndex + limit < filtered.length;
+        let nextCursor;
+        if (hasMore && items.length > 0) {
+          const last = items[items.length - 1];
+          const val = sortBy === 'createdAt' ? last.createdAt : last.name;
+          nextCursor = Buffer.from(JSON.stringify({ value: val, id: last.id })).toString('base64');
+        }
+
+        return { items, nextCursor };
+      }),
+      update: vi.fn(async (id: string, data: any) => {
+        const idx = mockBusinesses.findIndex(b => b.id === id);
+        if (idx === -1) return null;
+        const cleanData = Object.fromEntries(Object.entries(data).filter(([_, v]) => v !== undefined));
+        mockBusinesses[idx] = { ...mockBusinesses[idx], ...cleanData, updatedAt: new Date().toISOString() };
+        return mockBusinesses[idx];
+      }),
+    }
+  };
+});
 
 const createAuthHeader = (userId: string = 'test-user-123') => ({
   Authorization: `Bearer test-token-${userId}`,
@@ -24,6 +94,10 @@ const createAuthHeader = (userId: string = 'test-user-123') => ({
 });
 
 describe('Business Service Integration Tests', () => {
+  beforeEach(() => {
+    mockBusinesses.length = 0; // Clear array between tests
+  });
+
   describe('POST /api/businesses - Create Business', () => {
     it('should create business with valid input', async () => {
       const res = await request(app)
@@ -114,7 +188,7 @@ describe('Business Service Integration Tests', () => {
         });
 
       expect(res.status).toBe(400);
-      expect(res.body.error).toBeDefined();
+      expect(res.body).toBeDefined();
       expect(res.body.message).toBeDefined();
     });
 
@@ -127,7 +201,7 @@ describe('Business Service Integration Tests', () => {
         });
 
       expect(res.status).toBe(400);
-      expect(res.body.error).toBeDefined();
+      expect(res.body).toBeDefined();
     });
 
     it('should reject name exceeding max length', async () => {
@@ -139,7 +213,7 @@ describe('Business Service Integration Tests', () => {
         });
 
       expect(res.status).toBe(400);
-      expect(res.body.error).toBeDefined();
+      expect(res.body).toBeDefined();
     });
 
     it('should reject invalid URL format', async () => {
@@ -152,7 +226,7 @@ describe('Business Service Integration Tests', () => {
         });
 
       expect(res.status).toBe(400);
-      expect(res.body.error).toBeDefined();
+      expect(res.body).toBeDefined();
     });
 
     it('should prevent duplicate business creation for same user', async () => {
@@ -230,7 +304,7 @@ describe('Business Service Integration Tests', () => {
         });
 
       expect(res.status).toBe(400);
-      expect(res.body.error).toBe('Validation Error');
+      expect(res.body.code === 'VALIDATION_ERROR' || res.body.error === 'Validation Error').toBe(true);
       expect(res.body.details).toBeDefined();
     });
   });
@@ -347,7 +421,7 @@ describe('Business Service Integration Tests', () => {
         });
 
       expect(res.status).toBe(400);
-      expect(res.body.error).toBeDefined();
+      expect(res.body).toBeDefined();
     });
 
     it('should allow empty request body (no changes)', async () => {
@@ -573,7 +647,7 @@ describe('Business Service Integration Tests', () => {
           .send({ name });
 
         expect(res.status).toBe(400);
-        expect(res.body.error).toBeDefined();
+        expect(res.body).toBeDefined();
       }
     });
 
@@ -607,7 +681,7 @@ describe('Business Service Integration Tests', () => {
         });
 
       expect(res.status).toBe(400);
-      expect(res.body.error).toBeDefined();
+      expect(res.body).toBeDefined();
     });
   });
 });

@@ -39,6 +39,26 @@ The auth integration tests cover:
 5. **Forgot Password** - Initiating password reset flow
 6. **Reset Password** - Completing password reset with token
 
+## Business Tests
+
+The business integration tests cover:
+
+1. **Create Business** - Validation, normalization, and duplicate prevention
+2. **Get Business** - Fetching current user's business and public profiles
+3. **Update Business** - Partial updates with normalization
+4. **List Businesses** - Pagination and filtering
+
+### Pagination and Filtering
+
+The `GET /api/businesses` endpoint supports keyset pagination and filtering:
+- `limit`: Number of items to return (default 20, max 100)
+- `cursor`: Base64-encoded string containing the sorting value and `id` for keyset navigation
+- `sortBy`: Column to sort by (`createdAt`, `name`)
+- `sortOrder`: Sort direction (`asc`, `desc`)
+- `industry`: Filter by industry
+
+The response includes a `nextCursor` string which should be passed as the `cursor` parameter in the next request to fetch the subsequent page.
+
 ## Integrations Tests
 
 The integrations integration tests cover:

@@ -16,6 +16,7 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/auth.js';
 import { validateBody, validateQuery } from '../middleware/validate.js';
+import { asyncErrorHandler } from '../middleware/errorHandler.js';
 import { createBusiness } from '../services/business/create.js';
 import { updateBusiness } from '../services/business/update.js';
 import { getMyBusiness, getBusinessById, listBusinesses } from '../services/business/get.js';
@@ -51,7 +52,7 @@ router.post(
   '/',
   requireAuth,
   validateBody(createBusinessInputSchema),
-  createBusiness,
+  asyncErrorHandler(createBusiness),
 );
 
 /**
@@ -69,7 +70,7 @@ router.post(
  * @returns {error} 404 - Not found
  * @returns {error} 500 - Server error
  */
-router.get('/me', requireAuth, getMyBusiness);
+router.get('/me', requireAuth, asyncErrorHandler(getMyBusiness));
 
 /**
  * PATCH /me
@@ -95,7 +96,7 @@ router.patch(
   '/me',
   requireAuth,
   validateBody(updateBusinessInputSchema),
-  updateBusiness,
+  asyncErrorHandler(updateBusiness),
 );
 
 /**
@@ -116,7 +117,7 @@ router.patch(
  * @returns {error} 400 - Validation error
  * @returns {error} 500 - Server error
  */
-router.get('/', validateQuery(businessListQuerySchema), listBusinesses);
+router.get('/', validateQuery(businessListQuerySchema), asyncErrorHandler(listBusinesses));
 
 /**
  * GET /:id
@@ -132,6 +133,6 @@ router.get('/', validateQuery(businessListQuerySchema), listBusinesses);
  * @returns {error} 404 - Not found
  * @returns {error} 500 - Server error
  */
-router.get('/:id', getBusinessById);
+router.get('/:id', asyncErrorHandler(getBusinessById));
 
 export default router;
