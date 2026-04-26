@@ -1,7 +1,7 @@
 import express, { type Express } from "express";
-import cors from "cors";
 import type { Server } from "node:http";
 import { config } from "./config/index.js";
+import { createCorsMiddleware } from "./middleware/cors.js";
 import { errorHandler } from "./middleware/errorHandler.js";
 import { requestLogger } from "./middleware/requestLogger.js";
 import { apiVersionMiddleware, versionResponseMiddleware } from "./middleware/apiVersion.js";
