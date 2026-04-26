@@ -381,7 +381,12 @@ export function formatForStorage(data: {
   }
 
   if (data.website !== undefined) {
-    result.website = typeof data.website === 'string' ? normalizeUrl(data.website) : data.website;
+    if (typeof data.website === 'string') {
+      const normalizedWebsite = normalizeUrl(data.website);
+      result.website = normalizedWebsite.length > 0 ? normalizedWebsite : null;
+    } else {
+      result.website = data.website;
+    }
   }
 
   if (data.countryCode !== undefined) {
