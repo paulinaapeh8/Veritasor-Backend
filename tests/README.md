@@ -21,18 +21,13 @@ npm run test:coverage
 
 ## Test Structure
 
-```
-tests/
-├── unit/
-│   └── services/
-│       └── revenue/
-│           └── normalize.test.ts   # normalizeRevenueEntry, detectNormalizationDrift,
-│                                   # detectRevenueAnomaly, calibrateFromSeries
-└── integration/
-    ├── auth.test.ts                # Auth API flows (signup, login, refresh, reset)
-    ├── integrations.test.ts        # Integrations API flows (list, connect, OAuth)
-    └── razorpay-connect-state.test.ts  # Razorpay connect initiation: state & redirect URL safety
-```
+- `integration/` - Integration tests that test complete API flows
+  - `auth.test.ts` - Authentication API tests (signup, login, refresh, password reset)
+  - `integrations.test.ts` - Integrations API tests (list, connect, disconnect, OAuth flow)
+- `unit/` - Unit tests for individual modules and services
+  - `services/revenue/` - Revenue service tests
+    - `normalize.test.ts` - Revenue data normalization tests
+    - `revenueReportSchema.test.ts` - Revenue report schema validation and security tests
 
 ---
 
@@ -99,92 +94,63 @@ const cal = calibrateFromSeries(historicalSeries, { sigmaMultiplier: 2 });
 const result = detectRevenueAnomaly(currentSeries, cal);
 ```
 
-The returned `CalibrationResult` can be persisted (e.g. in Redis or Postgres) and
-reloaded on service start to avoid recomputing thresholds on every request.
+## Soroban RPC Client Configuration
 
-**Missing baseline fallback** — if the training series has fewer than 2 points, or if
-all prior-period amounts are zero, `calibrateFromSeries` returns the module defaults
-(`dropThreshold: 0.4`, `spikeThreshold: 3.0`) so the pipeline never hard-fails.
+The Soroban RPC client includes comprehensive timeout, retry, and resilience configuration for production deployments.
 
----
+### Environment Variables
 
-### Structured Logging
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SOROBAN_RPC_URL` | `https://soroban-testnet.stellar.org` | Soroban RPC endpoint URL |
+| `SOROBAN_CONTRACT_ID` | Required | Deployed attestation contract address (C...) |
+| `SOROBAN_NETWORK_PASSPHRASE` | `Test SDF Network ; September 2015` | Stellar network passphrase |
+| `SOROBAN_RPC_TIMEOUT_MS` | `5000` | Timeout for individual RPC requests (100-60000ms) |
+| `SOROBAN_RPC_MAX_RETRIES` | `2` | Maximum retry attempts after initial failure (0-5) |
+| `SOROBAN_RPC_RETRY_BASE_DELAY_MS` | `200` | Base delay for exponential backoff (1-30000ms) |
+| `SOROBAN_RPC_RETRY_MAX_DELAY_MS` | `1500` | Maximum delay for exponential backoff (1-30000ms) |
+| `SOROBAN_RPC_RETRY_JITTER_RATIO` | `0.2` | Jitter ratio to reduce synchronized retries (0-1) |
+| `SOROBAN_RPC_CIRCUIT_BREAKER_THRESHOLD` | `5` | Consecutive failures before opening circuit breaker (1-20) |
+| `SOROBAN_RPC_CIRCUIT_BREAKER_RESET_MS` | `30000` | Time before attempting to close circuit breaker (1000-300000ms) |
 
-Pass a logger callback to `detectRevenueAnomaly` to receive a typed `AnomalyLogRecord`
-on every invocation. Wire it to your application logger (e.g. `pino`, `winston`) for
-queryable, alertable anomaly events in your log aggregator (Datadog, Loki, etc.):
+### Resilience Features
 
-```ts
-import pino from 'pino';
-const log = pino();
+- **Timeout Protection**: Individual requests timeout to prevent hanging
+- **Exponential Backoff**: Delays increase exponentially with jitter to reduce thundering herd
+- **Circuit Breaker**: Prevents cascading failures by temporarily rejecting requests when service is unhealthy
+- **Enhanced Error Classification**: Retries DNS failures, stale connections, and rate limits
+- **Observability Hooks**: Structured logging and metrics collection for monitoring
 
-const result = detectRevenueAnomaly(series, cal, (record) => {
-  log.info(record, 'revenue_anomaly');
-});
-```
+### Security Considerations
 
-**`AnomalyLogRecord` shape:**
+- No sensitive data (keys, tokens) is logged
+- Circuit breaker prevents resource exhaustion attacks
+- Rate limit awareness prevents 429 response cascades
+- Request IDs enable distributed tracing
 
-```ts
-{
-  event:      'anomaly_detected' | 'anomaly_check_ok' | 'anomaly_insufficient_data';
-  flag:       AnomalyFlag;
-  score:      number;          // 0–1
-  detail:     string;
-  thresholds: { drop: number; spike: number; minDataPoints: number };
-  detectedAt: string;          // ISO 8601 UTC
+### Monitoring
+
+The client emits structured logs for:
+- Request start/completion with timing
+- Retry attempts with delay information
+- Circuit breaker state changes
+- Transport failures with error classification
+
+Use observability hooks for custom metrics collection:
+
+```typescript
+const hooks: SorobanObservabilityHooks = {
+  onRequestSuccess: (op, attempt, duration) => {
+    metrics.record(`soroban.${op}.success`, duration)
+  },
+  onRequestFailure: (op, attempt, duration, error) => {
+    metrics.record(`soroban.${op}.failure`, { duration, error: error.message })
+  },
+  onCircuitBreakerStateChange: (oldState, newState) => {
+    logger.info('Circuit breaker state changed', { oldState, newState })
+  }
 }
 ```
-
----
-
-### Seasonality & False-Positive Guidance
-
-Month-over-month thresholds can fire spuriously for businesses with strong seasonal
-patterns (e.g. e-commerce Q4 spikes, SaaS annual renewals).
-
-**Mitigation strategies:**
-
-1. **Use `calibrateFromSeries`** on ≥ 12 months of history so thresholds are derived
-   from your actual distribution (mean ± N·σ) rather than a generic constant.
-
-2. **Raise `ANOMALY_CALIBRATION_SIGMA`** to widen the acceptable band.
-   `2` is conservative; `3` reduces false positives at the cost of missing
-   smaller anomalies.
-
-3. **Inject a `scoreHook`** to encode business rules — for example, suppress the
-   spike flag during a known promotional window:
-
-   ```ts
-   const hook = (_prev, curr, _change) => {
-     if (curr.period === '2025-11') return { score: 0, flag: 'ok' };
-     return null; // fall back to built-in logic
-   };
-   const result = detectRevenueAnomaly(series, { scoreHook: hook });
-   ```
-
-4. **Raise `ANOMALY_SPIKE_THRESHOLD`** for specific business verticals that
-   routinely see multi-hundred-percent promotional surges.
-
----
-
-### Failure Modes
-
-| Condition | Behaviour |
-|---|---|
-| Series length < `minDataPoints` | Returns `{ flag: "insufficient_data", score: 0 }`. Never throws. |
-| All previous-period amounts are 0 | Pairs with `prev.amount === 0` are skipped silently; result is `ok`. |
-| `scoreHook` throws | Exception propagates to the caller — wrap externally if needed. |
-| Invalid env-var value | Hard-coded default is used; warning written to `stderr`. |
-| Training series too short for calibration | `calibrateFromSeries` returns module defaults without throwing. |
-
----
-
-### Idempotency
-
-Both `detectRevenueAnomaly` and `calibrateFromSeries` are **pure functions**: same
-inputs always produce the same outputs with no side effects or I/O. Safe to call
-multiple times with the same series. Neither function mutates its input array.
 
 ---
 
@@ -437,9 +403,92 @@ afterAll(async () => {
 });
 ```
 
----
+## Revenue Report Schema Tests
+
+The revenue report schema tests (`revenueReportSchema.test.ts`) cover comprehensive validation and security hardening for the `/api/analytics/revenue` endpoint query parameters.
+
+### Security Validation Coverage
+
+1. **Input Format Validation**
+   - Strict YYYY-MM format enforcement
+   - Year boundary validation (2020-2105)
+   - Month range validation (01-12)
+   - Length limits to prevent DoS attacks
+
+2. **Injection Prevention**
+   - HTML/Script injection attempts
+   - SQL injection patterns
+   - Command injection attempts
+   - Path traversal attacks
+   - XSS attempts with various encodings
+
+3. **Parameter Combination Validation**
+   - Period vs range parameter conflicts
+   - Required parameter combinations
+   - Mutual exclusivity enforcement
+
+4. **Edge Case Testing**
+   - Boundary conditions (min/max years)
+   - Malformed date strings
+   - Unicode and null byte attacks
+   - Extremely long strings
+
+### Test Categories
+
+- **Valid Inputs**: Ensure legitimate requests pass validation
+- **Invalid Format**: Reject malformed date strings
+- **Year Boundaries**: Enforce reasonable year limits
+- **Month Validation**: Proper month format and range
+- **Injection Prevention**: Block various attack vectors
+- **Parameter Combinations**: Validate parameter relationships
+- **DoS Prevention**: Prevent resource exhaustion attacks
+- **Error Types**: Verify structured error constants
 
 ## Best Practices
+
+- Test complete user flows, not just individual endpoints
+- Use descriptive test names that explain the scenario
+- Clean up test data between tests
+- Don't expose sensitive information in error messages
+- Test both success and failure cases
+- Verify security requirements (401, 403, etc.)
+- Test OAuth state validation and expiration
+- Ensure tokens and credentials are not leaked in responses
+- Include comprehensive negative testing for security-critical endpoints
+- Test boundary conditions and edge cases thoroughly
+- Validate input sanitization and injection prevention
+
+## Error Envelope Snapshot Coverage
+
+`integration/auth.test.ts` includes snapshot tests for the global error handler
+client shape. These tests pin the stable envelope fields:
+
+- `status: "error"`
+- `code` from `src/types/errors.ts`
+- client-safe `message`
+- optional `details` for validation failures, plus legacy `errors` alias for
+  existing validation clients
+- `timestamp` and `requestId`
+
+The snapshots cover direct Zod errors, PostgreSQL constraint and operational
+errors, and non-`Error` throwables. Timestamps and request IDs are normalized in
+the snapshot helper so the tests assert contract shape rather than runtime
+entropy.
+
+## Threat Model Notes
+
+- **Auth**: login, refresh, password reset, and current-user failures must keep
+  credential, token, and user-enumeration details out of responses. Server-side
+  logs should include request method, path, request ID, status code, and typed
+  error metadata for triage without recording request bodies or secrets.
+- **Webhooks**: malformed payloads, signature failures, replay attempts, and
+  provider downtime should return typed, generic envelopes. Logs may include
+  provider name, request ID, and verification outcome, but never webhook secrets,
+  raw signatures, payment tokens, or full provider payloads.
+- **Integrations**: OAuth state mismatches, token exchange failures, and provider
+  API errors should preserve stable client codes while redacting access tokens,
+  refresh tokens, API keys, merchant credentials, and database connection
+  details from both API responses and routine structured logs.
 
 - Test complete user flows, not just individual endpoints.
 - Use descriptive test names that document the expected scenario.
@@ -483,10 +532,62 @@ afterAll(async () => {
 
 ### Security Assumptions
 
-| Assumption | Validation |
-|---|---|
-| A user cannot access a business they do not own | E2E tests attempt unauthorized sync; verify `403 Forbidden` |
-| Merkle root accurately represents source data | Mutate one entry locally; verify Merkle proof mismatch vs on-chain root |
-| Private keys never appear in logs or API responses | Audit log assertions scan for `G...` and `S...` key patterns |
-| Identical requests don't result in multiple on-chain transactions | Check DB for a single record after multiple POST bursts |
-| Razorpay OAuth state cannot be forged, replayed, or stolen cross-user | State tests in `razorpay-connect-state.test.ts` assert each property |
+4. **Idempotency Integrity**:
+    - *Assumption*: Multiple identical requests do not result in multiple on-chain transactions (saving gas/fees).
+    - *Validation*: Check local database for single record entry after multiple POST bursts.
+    
+## Read Consistency & Security
+
+Veritasor implements a multi-tier consistency model for reading attestations to balance performance and security.
+
+### Consistency Levels
+
+1.  **LOCAL (Default)**:
+    -   Reads directly from the PostgreSQL database.
+    -   Lowest latency, suitable for most dashboard views.
+    -   Subject to indexing lag (DB might be a few blocks behind the chain).
+
+2.  **STRONG**:
+    -   Reads from the DB and then verifies the record against the Soroban blockchain state.
+    -   Higher latency (requires RPC calls).
+    -   Guarantees the data matches the "Truth on Chain".
+    -   Used for critical audits and legal proof generation.
+
+### Threat Model & Resilience Notes
+
+| Threat | Strategy | Mechanism |
+| :--- | :--- | :--- |
+| **Indexing Lag** | Detection & Auto-Correction | If a STRONG read finds a record on-chain that is still marked as `pending` in the DB, the system auto-updates the DB to `confirmed`. |
+| **Data Tampering** | Integrity Verification | If a STRONG read detects a Merkle root mismatch between the DB and the Chain, it logs a CRITICAL CONSISTENCY ERROR for immediate operator review. |
+| **Revocation Propagation** | Immediate Verification | STRONG reads ensure that if an attestation is revoked on-chain, it is treated as revoked by the system regardless of DB state. |
+| **Network Outage** | Graceful Degradation | If the Soroban RPC is unavailable during a STRONG read, the system falls back to LOCAL data and logs a warning. |
+
+### Operator Runbook: Discrepancies
+
+If a `CRITICAL CONSISTENCY ERROR` is observed in logs:
+1.  Verify the on-chain data using a block explorer or `stellar-cli`.
+2.  Check the database for unauthorized modifications.
+3.  Initiate a manual re-sync if the DB record is corrupted.
+
+## Email Security & Template Hardening
+
+The email service implements strict validation and sanitization to prevent injection attacks.
+
+### Injection Prevention
+
+1.  **Input Validation (Zod)**:
+    -   All emails are validated against the `z.string().email()` schema.
+    -   Reset links are validated to ensure they use safe protocols (`https:` or `http:` in dev). Unsafe protocols like `javascript:` or `data:` are rejected.
+
+2.  **HTML Escaping**:
+    -   All dynamic values interpolated into HTML templates are escaped using a dedicated `escapeHtml` utility.
+    -   This prevents attackers from injecting malicious HTML tags (e.g., `<script>`, `<iframe>`, `<img>`) even if they manage to partially control the link or other parameters.
+
+### Threat Model: Email Risks
+
+| Threat | Strategy | Mechanism |
+| :--- | :--- | :--- |
+| **HTML Injection** | Sanitization | `escapeHtml` converts `<`, `>`, `&`, `"`, and `'` into entities. |
+| **Link Wrapping/Phishing** | Protocol Gating | Only allowed protocols are permitted; others trigger a validation error. |
+| **Header Injection** | SMTP Library Safety | Use of `nodemailer` which handles header sanitization internally, combined with Zod validation of the `to` field. |
+| **Information Leakage** | Dev Stubs | In development mode, reset links are logged to the console instead of sent, and the `to` address is never leaked in unauthorized contexts. |
